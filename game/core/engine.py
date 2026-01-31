@@ -12,6 +12,7 @@ from game.systems.sprite_loader import SpriteLoader
 from game.systems.monster_loader import MonsterLoader
 from game.effects.laser import LaserBeam
 from game.effects.particles import ParticleSystem
+from game.effects.player_projectiles import PlayerProjectile
 from game.utils.assets import resource_path
 
 # 颜色定义
@@ -38,6 +39,13 @@ class GameEngine:
             {"label": "1-3", "boss": "dracula", "mask": "red"},
             {"label": "1-4", "boss": None, "mask": None},
         ]
+        self.base_attack_damage = 2
+        self.attack_profiles = {
+            0: {"type": "laser", "damage": self.base_attack_damage},
+            1: {"type": "wave", "damage": self.base_attack_damage * 2},
+            2: {"type": "lightning", "damage": self.base_attack_damage * 3},
+            3: {"type": "fireball", "damage": self.base_attack_damage * 4},
+        }
         self.level_index = 0
         self.final_level_index = len(self.levels) - 1
         self.level_clearing = False
@@ -56,6 +64,7 @@ class GameEngine:
         self.last_attack_sound_time = 0
         self.attack_sound = None  # 接收主程序传递的攻击音效
         self.lasers = []
+        self.player_projectiles = []
         self.particles = ParticleSystem()
 
         print("开始加载怪物资源...")
@@ -100,6 +109,7 @@ class GameEngine:
         self.state = "game"
 
         self.lasers = []
+        self.player_projectiles = []
         self.particles = ParticleSystem()
 
         self.map = Map(120, 80)
@@ -192,6 +202,8 @@ class GameEngine:
             print("[WARN] 未找到Boss房间，跳过Boss生成")
             return
 
+        self.map.carve_arena(self.end_room, radius_tiles=9)
+
         boss = Monster(
             monster_type=boss_type,
             monster_loader=self.monster_loader,
@@ -235,6 +247,9 @@ class GameEngine:
             self.state = "victory"
             return
         self._setup_level(next_index, reset_player=False)
+
+    def _current_attack_profile(self):
+        return self.attack_profiles.get(self.level_index, self.attack_profiles[0])
 
     # ---------------- 路径计算 ----------------
 
@@ -417,6 +432,8 @@ class GameEngine:
                         self._start_level_clear()
                     self.monsters.remove(monster)
 
+            self._update_player_projectiles(delta_time)
+
         # 让动画永远更新（防止 idle 停住）
         self.player.update_animation(delta_time)
 
@@ -437,6 +454,9 @@ class GameEngine:
         # ---------------- 新增：绘制怪物（在地图之后、玩家之前） ----------------
         for monster in self.monsters:
             monster.draw(self.screen, self.camera_x, self.camera_y)
+
+        for projectile in self.player_projectiles:
+            projectile.draw(self.screen, self.camera_x, self.camera_y)
 
         self.particles.draw(self.screen, self.camera_x, self.camera_y)
         for laser in self.lasers:
@@ -470,11 +490,18 @@ class GameEngine:
 
         # HUD 信息
         level_label = self.levels[self.level_index]["label"]
+        profile = self._current_attack_profile()
+        attack_name = {
+            "laser": "激光",
+            "wave": "蓝色波",
+            "lightning": "闪电",
+            "fireball": "火球",
+        }.get(profile["type"], profile["type"])
         hint_text = (
             f"关卡: {level_label} | "
             f"坐标: ({int(self.player.x)}, {int(self.player.y)}) | "
             f"距终点: {int(self._manhattan_dist((self.player.x, self.player.y), self.end_room))} | "
-            f"按J攻击(激光)，按K闪避"
+            f"按J攻击({attack_name} x{profile['damage']}), 按K闪避"
         )
         text_surface = self.font.render(hint_text, True, WHITE)
         self.screen.blit(text_surface, (10, 10))
@@ -597,10 +624,60 @@ class GameEngine:
             self.last_attack_sound_time = current_time
 
         if self.player.consume_attack_emit(current_time):
-            laser = LaserBeam(self.player.x, self.player.y, self.player.direction)
-            self.lasers.append(laser)
-            if self._apply_laser_damage(laser):
-                self.player.attack_hit = True
+            profile = self._current_attack_profile()
+            attack_type = profile["type"]
+            damage = profile["damage"]
+
+            if attack_type == "laser":
+                laser = LaserBeam(
+                    self.player.x,
+                    self.player.y,
+                    self.player.direction,
+                    color=(110, 255, 255),
+                    length=160,
+                    width=6,
+                )
+                self.lasers.append(laser)
+                if self._apply_laser_damage(laser, damage):
+                    self.player.attack_hit = True
+            elif attack_type == "lightning":
+                lightning = LaserBeam(
+                    self.player.x,
+                    self.player.y,
+                    self.player.direction,
+                    color=(255, 240, 120),
+                    length=220,
+                    width=8,
+                )
+                self.lasers.append(lightning)
+                if self._apply_laser_damage(lightning, damage):
+                    self.player.attack_hit = True
+            elif attack_type == "wave":
+                projectile = PlayerProjectile(
+                    self.player.x,
+                    self.player.y,
+                    self.player.direction,
+                    speed=8.0,
+                    damage=damage,
+                    color=(90, 160, 255),
+                    radius=10,
+                    ttl_ms=900,
+                    kind="wave",
+                )
+                self.player_projectiles.append(projectile)
+            elif attack_type == "fireball":
+                projectile = PlayerProjectile(
+                    self.player.x,
+                    self.player.y,
+                    self.player.direction,
+                    speed=9.0,
+                    damage=damage,
+                    color=(255, 140, 60),
+                    radius=9,
+                    ttl_ms=900,
+                    kind="fireball",
+                )
+                self.player_projectiles.append(projectile)
 
         # 攻击命中检测逻辑（仅在未命中过的情况下检测）
         if not self.player.attack_hit:
@@ -619,7 +696,7 @@ class GameEngine:
 
         # 不提前结束攻击状态，让动画完整播放
 
-    def _apply_laser_damage(self, laser):
+    def _apply_laser_damage(self, laser, damage):
         x1, y1, x2, y2 = laser.get_segment()
         hit_any = False
         for monster in self.monsters:
@@ -627,7 +704,7 @@ class GameEngine:
                 continue
             dist = self._distance_point_to_segment(monster.x, monster.y, x1, y1, x2, y2)
             if dist <= monster.hit_radius + laser.width:
-                monster.current_health -= 2
+                monster.current_health -= damage
                 hit_any = True
         return hit_any
 
@@ -641,6 +718,34 @@ class GameEngine:
         closest_x = x1 + t * dx
         closest_y = y1 + t * dy
         return math.hypot(px - closest_x, py - closest_y)
+
+    def _update_player_projectiles(self, delta_time):
+        for projectile in self.player_projectiles[:]:
+            projectile.update(delta_time)
+
+            if not projectile.is_alive():
+                self.player_projectiles.remove(projectile)
+                continue
+
+            if not self.map.is_passable(projectile.x, projectile.y):
+                if projectile.kind == "fireball":
+                    self.particles.spawn_burst(projectile.x, projectile.y, (255, 140, 60), count=14)
+                self.player_projectiles.remove(projectile)
+                continue
+
+            hit = False
+            for monster in self.monsters:
+                if not monster.is_active:
+                    continue
+                if projectile.check_collision(monster):
+                    monster.current_health -= projectile.damage
+                    hit = True
+                    break
+
+            if hit:
+                if projectile.kind == "fireball":
+                    self.particles.spawn_burst(projectile.x, projectile.y, (255, 120, 40), count=18)
+                self.player_projectiles.remove(projectile)
 
     # 在game_engine.py的_check_monster_collision方法中修改，约420-446行
     def _check_monster_collision(self):

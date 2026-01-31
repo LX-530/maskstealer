@@ -310,6 +310,7 @@ class Map:
         self.visual_seed = random.randint(0, 1_000_000)
         self._build_tile_cache()
         self._build_decorations()
+        self._build_obstacles()
 
     def find_start_position(self):
         """选择边缘房间作为起始点"""
@@ -341,6 +342,8 @@ class Map:
         tx = int(x // TILE_SIZE)
         ty = int(y // TILE_SIZE)
         if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
+            return False
+        if (tx, ty) in self.blocked_positions:
             return False
         tile = self.tiles[ty][tx]
         return tile == TILE_EMPTY
@@ -377,6 +380,12 @@ class Map:
 
                 screen.blit(tile, (rect_x, rect_y))
 
+        for obstacle in self.obstacles:
+            ox = obstacle["x"] * tile_size - camera_x
+            oy = obstacle["y"] * tile_size - camera_y
+            if -tile_size <= ox <= screen_w and -tile_size <= oy <= screen_h:
+                screen.blit(obstacle["surface"], (ox, oy))
+
         for deco in self.decorations:
             dx = deco["x"] * tile_size - camera_x
             dy = deco["y"] * tile_size - camera_y
@@ -401,29 +410,40 @@ class Map:
         return self.wall_tiles[self._variant_index(x, y, len(self.wall_tiles))]
 
     def _build_tile_cache(self):
-        self.floor_tiles = [self._make_floor_tile(seed) for seed in range(4)]
-        self.wall_tiles = [self._make_wall_tile(seed) for seed in range(3)]
+        self.floor_tiles = [self._make_floor_tile(seed) for seed in range(6)]
+        self.wall_tiles = [self._make_wall_tile(seed) for seed in range(4)]
         self.decorations = []
         self.glows = []
+        self.obstacles = []
+        self.blocked_positions = set()
 
     def _make_floor_tile(self, seed):
         rng = random.Random(seed + self.visual_seed)
         tile = pygame.Surface((TILE_SIZE, TILE_SIZE))
-        base = (62, 60, 66)
-        dark = (42, 40, 46)
-        light = (78, 76, 84)
+        palettes = [
+            ((62, 60, 66), (42, 40, 46), (78, 76, 84)),
+            ((70, 64, 58), (48, 44, 40), (90, 86, 80)),
+            ((58, 66, 70), (38, 46, 50), (76, 86, 92)),
+        ]
+        base, dark, light = palettes[seed % len(palettes)]
         tile.fill(base)
         for _ in range(12):
             x = rng.randint(0, TILE_SIZE - 1)
             y = rng.randint(0, TILE_SIZE - 1)
             tile.set_at((x, y), light if rng.random() < 0.5 else dark)
+        if rng.random() < 0.6:
+            crack_color = dark
+            cx = rng.randint(2, TILE_SIZE - 3)
+            cy = rng.randint(2, TILE_SIZE - 3)
+            pygame.draw.line(tile, crack_color, (cx - 1, cy), (cx + 1, cy))
         pygame.draw.rect(tile, (34, 32, 36), (0, 0, TILE_SIZE, TILE_SIZE), 1)
         return tile
 
     def _make_wall_tile(self, seed):
         rng = random.Random(seed + self.visual_seed + 200)
         tile = pygame.Surface((TILE_SIZE, TILE_SIZE))
-        base = (36, 34, 40)
+        base_palette = [(36, 34, 40), (44, 40, 46), (32, 30, 36), (50, 46, 52)]
+        base = base_palette[seed % len(base_palette)]
         tile.fill(base)
         for _ in range(14):
             x = rng.randint(0, TILE_SIZE - 1)
@@ -467,6 +487,39 @@ class Map:
                     self.decorations.append({"surface": torch, "x": tx, "y": ty})
                     self.glows.append({"surface": glow, "x": tx - 1, "y": ty - 1})
 
+    def _build_obstacles(self):
+        rng = random.Random(self.visual_seed + 1500)
+        self.obstacles = []
+        self.blocked_positions = set()
+
+        crate = self._make_crate()
+        pillar = self._make_pillar()
+
+        for room in self.rooms:
+            if not room.get("is_valid"):
+                continue
+
+            center_x = room["x"] + room["width"] // 2
+            center_y = room["y"] + room["height"] // 2
+            max_count = 3 if room["width"] * room["height"] > 120 else 2
+            count = rng.randint(1, max_count)
+
+            attempts = 0
+            while count > 0 and attempts < 20:
+                attempts += 1
+                x = rng.randint(room["x"] + 2, room["x"] + room["width"] - 3)
+                y = rng.randint(room["y"] + 2, room["y"] + room["height"] - 3)
+                if abs(x - center_x) <= 1 and abs(y - center_y) <= 1:
+                    continue
+                if (x, y) in self.blocked_positions:
+                    continue
+                if self.tiles[y][x] != TILE_EMPTY:
+                    continue
+                surface = crate if rng.random() < 0.6 else pillar
+                self.obstacles.append({"surface": surface, "x": x, "y": y})
+                self.blocked_positions.add((x, y))
+                count -= 1
+
     def _make_crate(self):
         surf = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
         base = (110, 76, 44)
@@ -499,3 +552,26 @@ class Map:
         pygame.draw.circle(surf, (255, 160, 80, 60), (center, center), 10)
         pygame.draw.circle(surf, (255, 120, 60, 40), (center, center), 16)
         return surf
+
+    def carve_arena(self, center_px, radius_tiles=7):
+        cx = int(center_px[0] // TILE_SIZE)
+        cy = int(center_px[1] // TILE_SIZE)
+        for y in range(cy - radius_tiles, cy + radius_tiles + 1):
+            if y < 0 or y >= self.height:
+                continue
+            for x in range(cx - radius_tiles, cx + radius_tiles + 1):
+                if x < 0 or x >= self.width:
+                    continue
+                self.tiles[y][x] = TILE_EMPTY
+
+        if self.obstacles:
+            filtered = []
+            blocked = set()
+            for obstacle in self.obstacles:
+                ox, oy = obstacle["x"], obstacle["y"]
+                if abs(ox - cx) <= radius_tiles and abs(oy - cy) <= radius_tiles:
+                    continue
+                filtered.append(obstacle)
+                blocked.add((ox, oy))
+            self.obstacles = filtered
+            self.blocked_positions = blocked
