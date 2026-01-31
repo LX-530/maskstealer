@@ -92,15 +92,25 @@ class Game:
     def load_audio_resources(self):
         """加载音频资源（适配实际文件路径）"""
         try:
-            # 加载背景音乐：sounds/music/background.ogg
-            bgm_path = resource_path(os.path.join("sounds", "music", "background.ogg"))
-            if os.path.exists(bgm_path):
-                pygame.mixer.music.load(bgm_path)
-                pygame.mixer.music.set_volume(0.3)  # 背景音音量30%
-                self.background_music = bgm_path
-                print("[OK] 成功加载背景音乐: background.ogg")
-            else:
-                print("[WARN] 背景音乐文件不存在: sounds/music/background.ogg")
+            # 加载背景音乐：优先尝试 mp3，再尝试 ogg
+            bgm_candidates = ["background.mp3", "background.ogg"]
+            bgm_loaded = False
+            for filename in bgm_candidates:
+                bgm_path = resource_path(os.path.join("sounds", "music", filename))
+                if not os.path.exists(bgm_path):
+                    continue
+                try:
+                    pygame.mixer.music.load(bgm_path)
+                    pygame.mixer.music.set_volume(0.3)  # 背景音音量30%
+                    self.background_music = bgm_path
+                    print(f"[OK] 成功加载背景音乐: {filename}")
+                    bgm_loaded = True
+                    break
+                except Exception as exc:
+                    print(f"[WARN] 背景音乐加载失败 {filename}: {exc}")
+                    continue
+            if not bgm_loaded:
+                print("[WARN] 背景音乐文件不存在: sounds/music/background.mp3 或 background.ogg")
 
             # 加载攻击音效：sounds/sfx/attack.flac
             attack_path = resource_path(os.path.join("sounds", "sfx", "attack.flac"))
