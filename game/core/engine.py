@@ -2,6 +2,7 @@ import pygame
 import sys
 import random
 import math
+import os
 from collections import deque
 
 from game.core.map import Map, TILE_EMPTY, TILE_WALL, TILE_STAIRS, TILE_SIZE
@@ -11,6 +12,7 @@ from game.systems.sprite_loader import SpriteLoader
 from game.systems.monster_loader import MonsterLoader
 from game.effects.laser import LaserBeam
 from game.effects.particles import ParticleSystem
+from game.utils.assets import resource_path
 
 # 颜色定义
 GOLD = (255, 215, 0)
@@ -30,31 +32,103 @@ class GameEngine:
         self.state = "game"
         self.victory = False
         self.move_speed = 5
+        self.levels = [
+            {"label": "1-1", "boss": "zombie", "mask": "blue"},
+            {"label": "1-2", "boss": "mummy", "mask": "yellow"},
+            {"label": "1-3", "boss": "dracula", "mask": "red"},
+            {"label": "1-4", "boss": None, "mask": None},
+        ]
+        self.level_index = 0
+        self.final_level_index = len(self.levels) - 1
+        self.level_clearing = False
+        self.level_clear_start = 0
+        self.level_clear_duration = 1400
+        self.mask_key = None
+        self.mask_images = self._load_masks()
 
         # 精灵加载器
         self.sprite_loader = SpriteLoader()
         print("开始加载精灵资源...")
         self.sprite_loader.load_sprites()
 
-        # 玩家、地图初始化
         self.player = Player("勇者", self.sprite_loader)
-        self.map = Map(120, 80)
-        self.player.x, self.player.y = self.map.player_position
-
-        # 让玩家能用于闪避碰撞检测
-        self.player.set_map_reference(self.map)
-
-        # 房间中心
-        self.room_centers = self.map.get_room_centers()
-
-        self.last_damage_time = 0  # 新增这一行
-
+        self.last_damage_time = 0
         self.last_attack_sound_time = 0
         self.attack_sound = None  # 接收主程序传递的攻击音效
         self.lasers = []
         self.particles = ParticleSystem()
 
-        # 起点/终点选择逻辑（不改动）
+        print("开始加载怪物资源...")
+        self.monster_loader = MonsterLoader()
+        self.monster_loader.load_monster_gifs()
+
+        self.monsters = []
+        self.boss = None
+        self.map = None
+        self.room_centers = []
+        self.start_room = None
+        self.end_room = None
+        self.camera_x = 0
+        self.camera_y = 0
+
+        self._setup_level(self.level_index, reset_player=True)
+
+    def _load_masks(self):
+        masks = {}
+        mapping = {
+            "blue": "blue.jpg",
+            "yellow": "yellow.png",
+            "red": "red.png",
+        }
+        for key, filename in mapping.items():
+            path = resource_path("images", "mask", filename)
+            if not os.path.exists(path):
+                print(f"[WARN] 面具文件不存在: {path}")
+                continue
+            try:
+                masks[key] = pygame.image.load(path).convert_alpha()
+            except Exception as exc:
+                print(f"[ERR] 面具加载失败 {path}: {exc}")
+        return masks
+
+    def _setup_level(self, level_index, reset_player=False):
+        self.level_index = level_index
+        self.level_clearing = False
+        self.level_clear_start = 0
+        self.mask_key = None
+        self.victory = False
+        self.state = "game"
+
+        self.lasers = []
+        self.particles = ParticleSystem()
+
+        self.map = Map(120, 80)
+        if reset_player:
+            self.player.current_health = self.player.max_health
+        self.player.x, self.player.y = self.map.player_position
+        self.player.set_map_reference(self.map)
+        self.player.is_attacking = False
+        self.player.is_evading = False
+        self.player.attack_hit = False
+        self.player.current_frame = 0
+        self.player.animation_timer = 0
+        self.player._update_animation_frames()
+
+        self.room_centers = self.map.get_room_centers()
+        self._select_start_and_end()
+
+        self.monsters = []
+        self.boss = None
+        self._spawn_monsters()
+        self._spawn_boss_if_needed()
+
+        self.camera_x = self.player.x - self.screen.get_width() // 2
+        self.camera_y = self.player.y - self.screen.get_height() // 2
+
+        level_label = self.levels[self.level_index]["label"]
+        print(f"关卡 {level_label} 初始化完成，房间数: {len(self.room_centers)}")
+
+    def _select_start_and_end(self):
         if len(self.room_centers) >= 2:
             self.start_room = self._find_closest_room_center(self.player.x, self.player.y)
             farthest_room, path_distance = self._find_farthest_room_by_path(
@@ -78,22 +152,9 @@ class GameEngine:
             self.start_room = (self.player.x, self.player.y)
             self.end_room = (self.player.x + 300, self.player.y + 300)
 
-        # 相机初始化
-        self.camera_x = self.player.x - self.screen.get_width() // 2
-        self.camera_y = self.player.y - self.screen.get_height() // 2
-
-        print(f"起点: {self.start_room}, 终点: {self.end_room}, 房间数: {len(self.room_centers)}")
-
-        # ---------------- 怪物系统初始化 ----------------
-        print("开始加载怪物资源...")
-        self.monster_loader = MonsterLoader()
-        self.monster_loader.load_monster_gifs()  # 加载所有怪物GIF
-        self.monsters = []  # 存储所有怪物实例
-
-        # 修改 game_engine.py 中怪物生成部分（约第95-110行）
-        # 为每个房间创建一个随机怪物（跳过起点和终点房间）
+    def _spawn_monsters(self):
+        level_label = self.levels[self.level_index]["label"]
         for room in self.map.rooms:
-            # 计算房间中心像素坐标
             room_center = (
                 room["x"] + room["width"] // 2,
                 room["y"] + room["height"] // 2
@@ -103,14 +164,12 @@ class GameEngine:
                 room_center[1] * TILE_SIZE + TILE_SIZE // 2
             )
 
-            # 跳过起点附近和终点房间的怪物生成
             is_start_room = self._manhattan_dist(room_center_pixel, self.start_room) < 100
-            is_end_room = self._manhattan_dist(room_center_pixel, self.end_room) < 100
+            is_end_room = self._manhattan_dist(room_center_pixel, self.end_room) < 120
 
             if is_start_room or is_end_room:
-                continue  # 跳过起点和终点房间
+                continue
 
-            # 随机选择怪物类型
             monster_type = self.monster_loader.get_random_monster_type()
             if monster_type:
                 monster = Monster(
@@ -120,8 +179,62 @@ class GameEngine:
                     map_instance=self.map
                 )
                 self.monsters.append(monster)
-                print(f"生成怪物：{monster_type}（房间中心：{room_center_pixel}）")
-        print(f"怪物生成完成，共 {len(self.monsters)} 个怪物")
+        print(f"关卡 {level_label} 普通怪物生成完成，共 {len(self.monsters)} 个怪物")
+
+    def _spawn_boss_if_needed(self):
+        info = self.levels[self.level_index]
+        boss_type = info["boss"]
+        if not boss_type:
+            return
+
+        boss_room = self._find_room_for_center(self.end_room)
+        if not boss_room:
+            print("[WARN] 未找到Boss房间，跳过Boss生成")
+            return
+
+        boss = Monster(
+            monster_type=boss_type,
+            monster_loader=self.monster_loader,
+            room=boss_room,
+            map_instance=self.map,
+            is_boss=True,
+            boss_scale=1.4,
+            max_health=24
+        )
+        self.boss = boss
+        self.monsters.append(boss)
+        self.end_room = (boss.x, boss.y)
+        print(f"Boss生成完成: {boss_type}")
+
+    def _find_room_for_center(self, center):
+        best_room = None
+        best_dist = 1e9
+        for room in self.map.rooms:
+            room_center_pixel = (
+                (room["x"] + room["width"] // 2) * TILE_SIZE + TILE_SIZE // 2,
+                (room["y"] + room["height"] // 2) * TILE_SIZE + TILE_SIZE // 2
+            )
+            dist = self._manhattan_dist(room_center_pixel, center)
+            if dist < best_dist:
+                best_dist = dist
+                best_room = room
+        return best_room
+
+    def _start_level_clear(self):
+        if self.level_clearing:
+            return
+        info = self.levels[self.level_index]
+        self.mask_key = info["mask"]
+        self.level_clearing = True
+        self.level_clear_start = pygame.time.get_ticks()
+
+    def _advance_level(self):
+        next_index = self.level_index + 1
+        if next_index > self.final_level_index:
+            self.victory = True
+            self.state = "victory"
+            return
+        self._setup_level(next_index, reset_player=False)
 
     # ---------------- 路径计算 ----------------
 
@@ -252,6 +365,8 @@ class GameEngine:
         return True
 
     def _check_victory(self):
+        if self.level_index != self.final_level_index:
+            return
         if self._manhattan_dist((self.player.x, self.player.y), self.end_room) <= 30:
             self.victory = True
             self.state = "victory"
@@ -261,6 +376,13 @@ class GameEngine:
 
     def update(self):
         delta_time = self.clock.tick(self.FPS)
+
+        if self.level_clearing:
+            self.lasers = [laser for laser in self.lasers if laser.is_alive()]
+            self.particles.update(delta_time)
+            if pygame.time.get_ticks() - self.level_clear_start >= self.level_clear_duration:
+                self._advance_level()
+            return
 
         if self.state == "game" and not self.victory:
             self._handle_player_movement()
@@ -291,6 +413,8 @@ class GameEngine:
                         monster.y,
                         monster.get_death_color(),
                     )
+                    if monster.is_boss and self.level_index < self.final_level_index:
+                        self._start_level_clear()
                     self.monsters.remove(monster)
 
         # 让动画永远更新（防止 idle 停住）
@@ -345,7 +469,9 @@ class GameEngine:
         pygame.draw.circle(self.screen, ORANGE, (int(end_x), int(end_y)), 3)
 
         # HUD 信息
+        level_label = self.levels[self.level_index]["label"]
         hint_text = (
+            f"关卡: {level_label} | "
             f"坐标: ({int(self.player.x)}, {int(self.player.y)}) | "
             f"距终点: {int(self._manhattan_dist((self.player.x, self.player.y), self.end_room))} | "
             f"按J攻击(激光)，按K闪避"
@@ -375,7 +501,37 @@ class GameEngine:
             pygame.draw.rect(self.screen, RED, bg_rect, 2)
             self.screen.blit(surface, rect)
 
+        if self.level_clearing:
+            self._draw_mask_overlay()
+
         pygame.display.flip()
+
+    def _draw_mask_overlay(self):
+        if not self.mask_key:
+            return
+        mask = self.mask_images.get(self.mask_key)
+        if not mask:
+            return
+
+        elapsed = pygame.time.get_ticks() - self.level_clear_start
+        progress = max(0.0, min(1.0, elapsed / self.level_clear_duration))
+        eased = progress ** 0.7
+        scale = 0.2 + 0.9 * eased
+
+        overlay = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, int(160 * progress)))
+        self.screen.blit(overlay, (0, 0))
+
+        width = max(1, int(mask.get_width() * scale))
+        height = max(1, int(mask.get_height() * scale))
+        scaled = pygame.transform.smoothscale(mask, (width, height))
+        rect = scaled.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() // 2))
+        self.screen.blit(scaled, rect)
+
+        label = f"获得 {self.mask_key} 面具"
+        text = self.font.render(label, True, WHITE)
+        text_rect = text.get_rect(center=(self.screen.get_width() // 2, rect.bottom + 30))
+        self.screen.blit(text, text_rect)
 
     def handle_events(self, events):
         for event in events:
@@ -384,6 +540,11 @@ class GameEngine:
                 sys.exit()
 
             if event.type == pygame.KEYDOWN:
+                if self.level_clearing:
+                    if event.key == pygame.K_ESCAPE:
+                        pygame.quit()
+                        sys.exit()
+                    continue
                 # J 攻击
                 if event.key == pygame.K_j:
                     if not self.victory:

@@ -43,7 +43,16 @@ class Projectile:
 
 
 class Monster:
-    def __init__(self, monster_type, monster_loader, room, map_instance):
+    def __init__(
+        self,
+        monster_type,
+        monster_loader,
+        room,
+        map_instance,
+        is_boss=False,
+        boss_scale=1.0,
+        max_health=None,
+    ):
         # 通过 loader 再清洗一次，确保一致
         self.type = monster_type.lower()
         self.loader = monster_loader
@@ -62,12 +71,18 @@ class Monster:
         self.frame_delay = 6
         self.frame_tick = 0
         self.is_active = False
+        self.is_boss = is_boss
+        self.boss_scale = boss_scale
         # 立刻加载 idle 确保怪物可见
         self._update_animation_frames()
 
-        self.max_health = 10  # 怪物最大生命值
-        self.current_health = self.max_health  # 当前生命值
-        self.hit_radius = 16
+        base_health = 10 if max_health is None else max_health
+        if self.is_boss and max_health is None:
+            base_health = 24
+        self.max_health = base_health
+        self.current_health = self.max_health
+        base_radius = 16
+        self.hit_radius = int(base_radius * (self.boss_scale if self.is_boss else 1.0))
 
         self.type = monster_type.lower()
         self.loader = monster_loader
@@ -88,6 +103,14 @@ class Monster:
         if not frames:
             print(f"[ERR] 严重错误：{self.type}.{self.animation_state} 无帧 → 强制 idle")
             frames = self.loader.get_monster_animation(self.type, "idle")
+
+        if self.is_boss and self.boss_scale != 1.0:
+            scaled_frames = []
+            for frame in frames:
+                width = int(frame.get_width() * self.boss_scale)
+                height = int(frame.get_height() * self.boss_scale)
+                scaled_frames.append(pygame.transform.smoothscale(frame, (width, height)))
+            frames = scaled_frames
 
         self.animation_frames = frames
         self.current_frame = 0
@@ -117,6 +140,11 @@ class Monster:
         # 绘制血条
         health_bar_width = 30
         health_bar_height = 4
+        offset_y = 25
+        if self.is_boss:
+            health_bar_width = 60
+            health_bar_height = 6
+            offset_y = 35
         health_ratio = self.current_health / self.max_health
 
         screen_x = self.x - camera_x
@@ -124,11 +152,11 @@ class Monster:
 
         # 血条背景
         pygame.draw.rect(screen, (255, 0, 0),
-                         (screen_x - health_bar_width // 2, screen_y - 25,
+                         (screen_x - health_bar_width // 2, screen_y - offset_y,
                           health_bar_width, health_bar_height))
         # 血条前景
         pygame.draw.rect(screen, (0, 255, 0),
-                         (screen_x - health_bar_width // 2, screen_y - 25,
+                         (screen_x - health_bar_width // 2, screen_y - offset_y,
                           health_bar_width * health_ratio, health_bar_height))
 
     # ========== 激活检测 ==========
